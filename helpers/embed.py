@@ -1,9 +1,7 @@
 import discord
 
 
-async def custom_embed(client, label, channelId, success) -> None:
-    channel = client.get_channel(channelId)
-
+async def custom_embed(label, channel, success) -> None:
     emoji = ""
     if success == True:
         emoji = "✅"

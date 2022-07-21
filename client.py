@@ -1,17 +1,21 @@
 import json
 import os
-import platform
 import random
+import platform
 import sys
 
 import discord
-from discord.ext import tasks, commands
-from discord.utils import get
+from discord.ext import tasks
 from discord.ext.commands import Bot
-from discord.ext.commands import Context
 
-from db.api import add_guild, connect, get_guild, remove_guild
+from helpers.checks import is_tw, reaction_check
 
+
+if not os.path.isfile("credentials.json"):
+    sys.exit("'credentials.json' not found! Please add it and try again.")
+else:
+    with open("credentials.json") as file:
+        credentials = json.load(file)
 
 if not os.path.isfile("config.json"):
     sys.exit("'config.json' not found! Please add it and try again.")
@@ -19,12 +23,18 @@ else:
     with open("config.json") as file:
         config = json.load(file)
 
+if not os.path.isfile("confessions.json"):
+    sys.exit("'confessions.json' not found! Please add it and try again.")
+
 
 intents = discord.Intents.default()
 intents.members = True
 intents.reactions = True
+intents.message_content = True
 
 client = Bot(command_prefix=config["prefix"], intents=intents)
+# Removes the default help command of discord.py to be able to create our custom help command.
+client.remove_command("help")
 
 
 @client.event
@@ -46,35 +56,8 @@ async def status_task() -> None:
     Setup the game status task of the client
     """
 
-    statuses = ["YOU SHALL NOT PASS!"]
+    statuses = ["doing gossips"]
     await client.change_presence(activity=discord.Game(random.choice(statuses)))
-
-
-# Removes the default help command of discord.py to be able to create our custom help command.
-client.remove_command("help")
-
-
-def load_commands(command_type: str) -> None:
-    for file in os.listdir(f"./cogs/{command_type}"):
-        if file.endswith(".py"):
-            extension = file[:-3]
-            try:
-                client.load_extension(f"cogs.{command_type}.{extension}")
-                print(f"Loaded extension '{extension}'")
-            except Exception as e:
-                exception = f"{type(e).__name__}: {e}"
-                print(f"Failed to load extension {extension}\n{exception}")
-
-
-if __name__ == "__main__":
-    """
-    This will automatically load slash commands and normal commands located in their respective folder.
-
-    If you want to remove slash commands, which is not recommended due to the Message Intent being a privileged intent, you can remove the loading of slash commands below.
-    """
-
-    # load_commands("slash") uncomment if slash commands are added to the bot
-    load_commands("normal")
 
 
 @client.event
@@ -84,93 +67,90 @@ async def on_message(message: discord.Message) -> None:
     :param message: The message that was sent.
     """
 
-    if message.author == client.user or message.author.bot:
+    member = message.author
+
+    if not os.path.isfile("confessions.json"):
+        sys.exit("'confessions.json' not found! Please add it and try again.")
+    else:
+        with open("confessions.json") as file:
+            confessions = json.load(file)
+
+    # check if author is not the bot itself
+    if member == client.user or member.bot:
         return
-    await client.process_commands(message)
 
+    # check if it is a Thread
+    if isinstance(message.channel, discord.channel.Thread):
+        if str(member.id) in confessions:
+            if message.channel.id in confessions[str(member.id)]:
+                await message.delete()
+                await message.channel.send(message.content)
+        return
 
-@client.event
-async def on_command_error(ctx: Context, error) -> None:
-    """
-    The code in this event is executed every time a normal valid command catches an error
-    :param ctx: The normal command that failed executing.
-    :param error: The error that has been faced.
-    """
+    try:
+        # check the channel where the message was sent
+        if message.channel.name == config["confessionsChannelName"]:
+            await message.delete()
 
-    if isinstance(error, commands.CommandOnCooldown):
-        minutes, seconds = divmod(error.retry_after, 60)
-        hours, minutes = divmod(minutes, 60)
-        hours = hours % 24
-        embed = discord.Embed(
-            title="Hey, please slow down!",
-            description=f"You can use this command again in {f'{round(hours)} hours' if round(hours) > 0 else ''} {f'{round(minutes)} minutes' if round(minutes) > 0 else ''} {f'{round(seconds)} seconds' if round(seconds) > 0 else ''}.",
-            color=0xE02B2B,
-        )
-        await ctx.send(embed=embed)
-    elif isinstance(error, commands.MissingPermissions):
-        embed = discord.Embed(
-            title="Error!",
-            description="You are missing the permission(s) `"
-            + ", ".join(error.missing_permissions)
-            + "` to execute this command!",
-            color=0xE02B2B,
-        )
-        await ctx.send(embed=embed)
-    elif isinstance(error, commands.MissingRequiredArgument):
-        embed = discord.Embed(
-            title="Error!",
-            description=str(error).capitalize(),
-            # We need to capitalize because the command arguments have no capital letter in the code.
-            color=0xE02B2B,
-        )
-        await ctx.send(embed=embed)
-    raise error
+            msg = await member.send(config["askSpillBeans"])
 
+            await msg.add_reaction("✅")
+            await msg.add_reaction("❌")
 
-@client.event
-async def on_guild_join(guild) -> None:
-    """
-    The code in this event is executed every time the bot joins a guild
-    """
+            confirmation = await client.wait_for("reaction_add", check=reaction_check(client, msg.id))
 
-    conn = connect()
-    col = conn["db"].guilds
-    guildData = {"guildId": guild.id, "enabled": False, "extensions": {}}
+            if confirmation[0].emoji == "✅":
+                checkChannel = discord.utils.get(client.get_all_channels(), name=config["confessionsCheckChannelName"])
+                checkMsg = await checkChannel.send(f"**Review the following bean :**\n{message.content}")
 
-    add_guild(col, guildData)
+                await checkMsg.add_reaction("✅")
+                await checkMsg.add_reaction("❌")
 
+                adminConfirmation = await client.wait_for("reaction_add", check=reaction_check(client, checkMsg.id))
 
-@client.event
-async def on_guild_remove(guild) -> None:
-    """
-    The code in this event is executed every time the leaves a guild
-    """
+                if adminConfirmation[0].emoji == "✅":
+                    count = 0
+                    async for _ in message.channel.history(limit=None):
+                        count += 1
 
-    conn = connect()
-    col = conn["db"].guilds
+                    tw = is_tw(message.content)
 
-    remove_guild(col, guild.id)
+                    if tw:
+                        twMessage = config["twMessage"]
+                        beanMsg = await message.channel.send(f"**Bean-{count}**\n{twMessage}")
 
+                        thread = await message.channel.create_thread(
+                            message=beanMsg, name=f"Bean-{count}", auto_archive_duration=24 * 60
+                        )
 
-@client.event
-async def on_member_join(member) -> None:
-    """
-    The code in this event is executed every time a member joins a guild
-    """
-    conn = connect()
-    col = conn["db"].guilds
+                        await thread.send(message.content)
+                    else:
+                        beanMsg = await message.channel.send(f"**Bean-{count}**\n{message.content}")
 
-    guildData = get_guild(col, member.guild.id)
+                        thread = await message.channel.create_thread(
+                            message=beanMsg, name=f"Bean-{count}", auto_archive_duration=24 * 60
+                        )
 
-    if "enabled" in guildData.keys() and guildData["enabled"]:
-        rolesIds = []
-        [rolesIds.append(role.id) for role in member.guild.roles]
+                    await member.send(f"Just spilled the beans as **Bean-{count}**")
+                    await checkChannel.send(f"Just spilled the beans as **Bean-{count}**")
 
-        # Give unchecked role to the user
-        if "uncheckedRoleId" in guildData.keys() and guildData["uncheckedRoleId"] in rolesIds:
-            uncheckedRole = get(member.guild.roles, id=guildData["uncheckedRoleId"])
-            await member.add_roles(uncheckedRole)
+                    if str(member.id) in confessions:
+                        confessions[str(member.id)].append(thread.id)
+                    else:
+                        confessions[str(member.id)] = [thread.id]
+
+                    with open("confessions.json", "w", encoding="utf-8") as file:
+                        json.dump(confessions, file, ensure_ascii=False, indent=4)
+                else:
+                    await member.send(f"Your bean was not approved by the staff. Try to write another one!")
+                    await checkChannel.send(f"Bean not sent !")
+
+            else:
+                await member.send(config["noSpillBeans"])
+
+    except KeyError:
+        return
 
 
 # Run the bot with the token
-client.run(config["token"])
+client.run(credentials["token"])
